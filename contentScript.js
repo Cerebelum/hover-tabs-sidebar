@@ -3,12 +3,12 @@
   window.__tabHoverSidebarInit = true;
 
   const EDGE_TRIGGER_PX = 16;
-  const HIDE_DELAY_MS = 220;
   const SAFE_ICON_CACHE = new Map();
   const DEFAULT_SETTINGS = { showPreview: true };
 
   let sidebarVisible = false;
   let hideTimer = null;
+  let showTimer = null;
   let previewItem = null;
   let allTabs = [];
   let searchQuery = "";
@@ -67,6 +67,7 @@
   sidebar.id = "tab-hover-sidebar";
   sidebar.setAttribute("tabindex", "-1");
   sidebar.innerHTML = `
+    <div class="tab-resizer" aria-hidden="true"></div>
     <div class="tab-sidebar-header">
       <span class="header-title">Вкладки</span>
       <div class="header-actions">
@@ -86,6 +87,7 @@
     <div class="tabs-list" role="list"></div>
     <div class="tab-sidebar-empty">Нет доступных вкладок</div>
     <div class="tab-preview" aria-hidden="true"></div>
+    <div class="tab-tooltip" aria-hidden="true"></div>
   `;
   document.documentElement.appendChild(sidebar);
 
@@ -98,6 +100,38 @@
   const list = sidebar.querySelector(".tabs-list");
   const emptyState = sidebar.querySelector(".tab-sidebar-empty");
   const preview = sidebar.querySelector(".tab-preview");
+  const tooltip = sidebar.querySelector(".tab-tooltip");
+
+  const applySidebarPlacement = () => {
+    sidebar.classList.remove("position-left", "position-right", "theme-dark", "theme-light");
+    sidebar.classList.add(`position-${settings.position === "both" ? "left" : settings.position}`);
+    sidebar.classList.add(`theme-${settings.theme}`);
+    sidebar.style.width = `${settings.width}px`;
+  };
+
+  const saveSettings = async () => {
+    if (!chrome.storage?.local) return;
+    await chrome.storage.local.set(settings);
+  };
+
+  const loadSettings = async () => {
+    if (!chrome.storage?.local) return;
+    const result = await chrome.storage.local.get(DEFAULT_SETTINGS);
+    settings = {
+      ...DEFAULT_SETTINGS,
+      ...result,
+      showDelay: Number(result.showDelay ?? DEFAULT_SETTINGS.showDelay),
+      hideDelay: Number(result.hideDelay ?? DEFAULT_SETTINGS.hideDelay),
+      width: Math.max(260, Math.min(560, Number(result.width ?? DEFAULT_SETTINGS.width))),
+    };
+
+    previewToggle.checked = Boolean(settings.showPreview);
+    positionSelect.value = settings.position;
+    showDelayInput.value = String(settings.showDelay);
+    hideDelayInput.value = String(settings.hideDelay);
+    themeSelect.value = settings.theme;
+    applySidebarPlacement();
+  };
 
   const cancelHide = () => {
     if (hideTimer) {
@@ -106,22 +140,43 @@
     }
   };
 
+  const cancelShow = () => {
+    if (showTimer) {
+      clearTimeout(showTimer);
+      showTimer = null;
+    }
+  };
+
+  const hideTooltip = () => {
+    tooltip.classList.remove("visible");
+    tooltip.textContent = "";
+    if (tooltipTimer) {
+      clearTimeout(tooltipTimer);
+      tooltipTimer = null;
+    }
+  };
+
   const hidePreview = () => {
     preview.classList.remove("visible");
     preview.innerHTML = "";
     previewItem = null;
+    hideTooltip();
   };
 
   const scheduleHide = () => {
     cancelHide();
-    hideTimer = setTimeout(() => hideSidebar(), HIDE_DELAY_MS);
+    hideTimer = setTimeout(() => hideSidebar(), Math.max(0, Number(settings.hideDelay) || 0));
   };
 
   const showSidebar = () => {
+    cancelShow();
     if (sidebarVisible) return;
-    sidebarVisible = true;
-    sidebar.classList.add("visible");
-    requestTabs();
+    const delay = Math.max(0, Number(settings.showDelay) || 0);
+    showTimer = setTimeout(() => {
+      sidebarVisible = true;
+      sidebar.classList.add("visible");
+      requestTabs();
+    }, delay);
   };
 
   const hideSidebar = (force = false) => {
@@ -260,8 +315,10 @@
     if (!type) return;
 
     const response = await safeSendMessage({ type, tabId });
-    if (!response?.success) {
-      console.warn(`Операция ${action} не выполнена:`, response?.error);
+    if (!response?.success) return;
+
+    if (action === "activate") {
+      hideSidebar(true);
       return;
     }
 
@@ -306,13 +363,9 @@
   };
 
   document.addEventListener("mousemove", (event) => {
-    if (event.clientX <= EDGE_TRIGGER_PX) {
+    if (pointerOnTrigger(event)) {
       showSidebar();
-    } else if (
-      sidebarVisible &&
-      !sidebar.contains(event.target) &&
-      event.clientX > sidebar.getBoundingClientRect().right + 24
-    ) {
+    } else if (sidebarVisible && !sidebar.contains(event.target) && shouldHideOnMove(event)) {
       scheduleHide();
     }
   });
@@ -325,9 +378,10 @@
     if (document.hidden) hideSidebar(true);
   });
 
-  window.addEventListener("blur", () => hideSidebar(true));
-
-  sidebar.addEventListener("mouseenter", cancelHide);
+  sidebar.addEventListener("mouseenter", () => {
+    cancelHide();
+    cancelShow();
+  });
   sidebar.addEventListener("mouseleave", scheduleHide);
   sidebar.addEventListener("focusin", cancelHide);
   sidebar.addEventListener("focusout", (event) => {
