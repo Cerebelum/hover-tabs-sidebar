@@ -4,20 +4,12 @@
 
   const EDGE_TRIGGER_PX = 16;
   const SAFE_ICON_CACHE = new Map();
-  const DEFAULT_SETTINGS = {
-    showPreview: true,
-    position: "left",
-    showDelay: 0,
-    hideDelay: 220,
-    theme: "dark",
-    width: 320,
-  };
+  const DEFAULT_SETTINGS = { showPreview: true };
 
   let sidebarVisible = false;
   let hideTimer = null;
   let showTimer = null;
   let previewItem = null;
-  let tooltipTimer = null;
   let allTabs = [];
   let searchQuery = "";
   let settings = { ...DEFAULT_SETTINGS };
@@ -41,6 +33,18 @@
         resolve({ success: false, error: error?.message || "Ошибка отправки сообщения." });
       }
     });
+
+  const loadSettings = async () => {
+    if (!chrome.storage?.local) return;
+    const result = await chrome.storage.local.get(DEFAULT_SETTINGS);
+    settings = { ...DEFAULT_SETTINGS, ...result };
+    previewToggle.checked = Boolean(settings.showPreview);
+  };
+
+  const saveSettings = async () => {
+    if (!chrome.storage?.local) return;
+    await chrome.storage.local.set(settings);
+  };
 
   const needsSanitization = (iconUrl) =>
     typeof iconUrl === "string" && location.protocol === "https:" && /^http:\/\//i.test(iconUrl);
@@ -71,33 +75,13 @@
         <button type="button" class="sidebar-settings" title="Настройки">⚙</button>
       </div>
     </div>
-    <div class="tab-sidebar-warning" hidden>
-      Панель может отображаться некорректно. Обновите текущую вкладку.
-    </div>
     <div class="tab-sidebar-toolbar">
       <input type="search" class="tab-search" placeholder="Поиск вкладок" aria-label="Поиск вкладок" />
       <span class="tabs-count">0</span>
     </div>
     <div class="tab-settings-panel" hidden>
-      <label><input type="checkbox" class="settings-preview-toggle" /> Показывать превью</label>
-      <label>Позиция
-        <select class="settings-position">
-          <option value="left">Слева</option>
-          <option value="right">Справа</option>
-          <option value="both">Слева и справа</option>
-        </select>
-      </label>
-      <label>Задержка показа (мс)
-        <input type="number" class="settings-show-delay" min="0" max="3000" step="50" />
-      </label>
-      <label>Задержка скрытия (мс)
-        <input type="number" class="settings-hide-delay" min="0" max="3000" step="50" />
-      </label>
-      <label>Тема
-        <select class="settings-theme">
-          <option value="dark">Темная</option>
-          <option value="light">Светлая</option>
-        </select>
+      <label>
+        <input type="checkbox" class="settings-preview-toggle" /> Показывать превью
       </label>
     </div>
     <div class="tabs-list" role="list"></div>
@@ -112,13 +96,7 @@
   const searchInput = sidebar.querySelector(".tab-search");
   const counter = sidebar.querySelector(".tabs-count");
   const settingsPanel = sidebar.querySelector(".tab-settings-panel");
-  const warningBox = sidebar.querySelector(".tab-sidebar-warning");
-  const resizer = sidebar.querySelector(".tab-resizer");
   const previewToggle = sidebar.querySelector(".settings-preview-toggle");
-  const positionSelect = sidebar.querySelector(".settings-position");
-  const showDelayInput = sidebar.querySelector(".settings-show-delay");
-  const hideDelayInput = sidebar.querySelector(".settings-hide-delay");
-  const themeSelect = sidebar.querySelector(".settings-theme");
   const list = sidebar.querySelector(".tabs-list");
   const emptyState = sidebar.querySelector(".tab-sidebar-empty");
   const preview = sidebar.querySelector(".tab-preview");
@@ -216,14 +194,11 @@
   const requestTabs = async () => {
     const response = await safeSendMessage({ type: "getTabs" });
     if (!response?.success) {
+      console.warn("Не удалось получить вкладки:", response?.error);
       allTabs = [];
-      const message = String(response?.error || "").toLowerCase();
-      warningBox.hidden = !(message.includes("context invalidated") || message.includes("receiving end"));
       renderTabs();
       return;
     }
-
-    warningBox.hidden = true;
     allTabs = response.tabs || [];
     renderTabs();
   };
@@ -347,47 +322,36 @@
       return;
     }
 
-    requestTabs();
-  };
-
-  const showPreviewOrTooltip = (item, mouseEvent) => {
-    if (!settings.showPreview) {
-      hidePreview();
-      const fullText = item.dataset.title || "";
-      if (!fullText) return;
-      if (tooltipTimer) clearTimeout(tooltipTimer);
-      tooltipTimer = setTimeout(() => {
-        tooltip.textContent = fullText;
-        const rect = sidebar.getBoundingClientRect();
-        const offsetY = Math.min(rect.height - 64, Math.max(16, mouseEvent.clientY - rect.top - 18));
-        tooltip.style.top = `${offsetY}px`;
-        tooltip.classList.add("visible");
-      }, 350);
+    if (action === "activate") {
+      hideSidebar(true);
       return;
     }
 
-    hideTooltip();
+    requestTabs();
+  };
+
+  const showPreview = (item, mouseEvent) => {
+    if (!settings.showPreview) {
+      hidePreview();
+      return;
+    }
 
     if (previewItem !== item) {
       previewItem = item;
       preview.innerHTML = "";
 
+      const previewImage = document.createElement("img");
+      previewImage.className = "preview-image";
+      previewImage.alt = item.dataset.title || "Превью вкладки";
+
       if (item.dataset.preview) {
-        const previewImage = document.createElement("img");
-        previewImage.className = "preview-image";
-        previewImage.alt = item.dataset.title || "Превью вкладки";
         previewImage.src = item.dataset.preview;
         preview.append(previewImage);
       } else {
         const title = document.createElement("div");
         title.className = "preview-title";
         title.textContent = item.dataset.title || "Без названия";
-
-        const url = document.createElement("div");
-        url.className = "preview-url";
-        url.textContent = item.dataset.url || "";
-
-        preview.append(title, url);
+        preview.append(title);
       }
     }
 
@@ -396,20 +360,6 @@
 
     preview.style.top = `${offsetY}px`;
     preview.classList.add("visible");
-  };
-
-  const pointerOnTrigger = (event) => {
-    if (settings.position === "left") return event.clientX <= EDGE_TRIGGER_PX;
-    if (settings.position === "right") return event.clientX >= window.innerWidth - EDGE_TRIGGER_PX;
-    return event.clientX <= EDGE_TRIGGER_PX || event.clientX >= window.innerWidth - EDGE_TRIGGER_PX;
-  };
-
-  const shouldHideOnMove = (event) => {
-    const rect = sidebar.getBoundingClientRect();
-    if (settings.position === "right") {
-      return event.clientX < rect.left - 24;
-    }
-    return event.clientX > rect.right + 24;
   };
 
   document.addEventListener("mousemove", (event) => {
@@ -447,31 +397,7 @@
   previewToggle.addEventListener("change", () => {
     settings.showPreview = previewToggle.checked;
     saveSettings();
-    hidePreview();
-  });
-
-  positionSelect.addEventListener("change", () => {
-    settings.position = positionSelect.value;
-    applySidebarPlacement();
-    saveSettings();
-  });
-
-  showDelayInput.addEventListener("change", () => {
-    settings.showDelay = Math.max(0, Number(showDelayInput.value) || 0);
-    showDelayInput.value = String(settings.showDelay);
-    saveSettings();
-  });
-
-  hideDelayInput.addEventListener("change", () => {
-    settings.hideDelay = Math.max(0, Number(hideDelayInput.value) || 0);
-    hideDelayInput.value = String(settings.hideDelay);
-    saveSettings();
-  });
-
-  themeSelect.addEventListener("change", () => {
-    settings.theme = themeSelect.value;
-    applySidebarPlacement();
-    saveSettings();
+    if (!settings.showPreview) hidePreview();
   });
 
   searchInput.addEventListener("input", () => {
@@ -504,35 +430,12 @@
         hidePreview();
         return;
       }
-      showPreviewOrTooltip(item, event);
+      showPreview(item, event);
     },
     { passive: true },
   );
 
   list.addEventListener("mouseleave", () => hidePreview());
-
-  resizer.addEventListener("mousedown", (event) => {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = sidebar.getBoundingClientRect().width;
-    const resizeFromRight = settings.position === "right";
-
-    const onMove = (moveEvent) => {
-      const delta = moveEvent.clientX - startX;
-      const next = resizeFromRight ? startWidth - delta : startWidth + delta;
-      settings.width = Math.max(260, Math.min(560, Math.round(next)));
-      sidebar.style.width = `${settings.width}px`;
-    };
-
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-      saveSettings();
-    };
-
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  });
 
   loadSettings().finally(requestTabs);
 })();
